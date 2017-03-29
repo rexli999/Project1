@@ -1,0 +1,600 @@
+---
+title: "Vocabulary Complexity Analysis on Inaugural Speeches"
+output: html_notebook
+toc: 
+toc_depth: 2
+---
+# Introduction 
+   During the 2016 presidential campaign, Donald J. Trump became the most controversial figure of the year due to the simplicity of his language and outspoken character. In this project, I seek to answer the following questions: (1) Does Donald Trump really speak in a simpler way than other politicians? (2) If he does, is Trump an outlier or is it the outcome of some underlying trend?
+  To answer these questions,  I choose inaugural speeches as the objects of our analysis. Presidential inauguration speeches are of great importance in that they sets the  tones of the political sphere in the next four years while inspiring people to move forward under new leadership. Therefore I believe that it can objectively reflect the presidents language usage.
+  First, I measure the readibilty of inaugural speech by gauging the complexity of vocabulary and comparing Donald Trump's vocabulary level exhibited in his inaugural speech to those of other four influential presidents.
+
+```{r "setup", include=FALSE}
+# Step 0: check and install needed packages. Load the libraries and functions.
+require("knitr")
+opts_knit$set(root.dir ="/Users/ZHANGJIAHAO/Desktop/R-studio")
+```
+
+```{r, message=FALSE, warning=FALSE,include=FALSE}
+packages.used=c("rvest", "tibble", "qdap", 
+                "sentimentr", "gplots", "dplyr",
+                "tm", "syuzhet", "factoextra", 
+                "beeswarm", "scales", "RColorBrewer",
+                "RANN", "tm", "topicmodels")
+
+# check packages that need to be installed.
+packages.needed=setdiff(packages.used, 
+                        intersect(installed.packages()[,1], 
+                                  packages.used))
+# install additional packages
+if(length(packages.needed)>0){
+  install.packages(packages.needed, dependencies = TRUE)
+}
+
+# load packages
+library("rvest")
+library("tibble")
+library("qdap")
+library("sentimentr")
+library("gplots")
+library("dplyr")
+library("tm")
+library("syuzhet")
+library("factoextra")
+library("beeswarm")
+library("scales")
+library("RColorBrewer")
+library("RANN")
+library("tm")
+library("topicmodels")
+
+source("../lib/plotstacked.R")
+source("../lib/speechFuncs.R")
+```
+
+
+```{r,include=FALSE}
+#This notebook was prepared with the following environmental settings.
+print(R.version)
+```
+
+```{r, message=FALSE, warning=FALSE,include=FALSE}
+# Step 1: Data harvest: scrap speech URLs from <http://www.presidency.ucsb.edu/>.
+### Inauguaral speeches
+main.page <- read_html(x = "http://www.presidency.ucsb.edu/inaugurals.php")
+# Get link URLs
+# f.speechlinks is a function for extracting links from the list of speeches. 
+inaug=f.speechlinks(main.page)
+#head(inaug)
+as.Date(inaug[,1], format="%B %e, %Y")
+inaug=inaug[-nrow(inaug),] # remove the last line, irrelevant due to error.
+
+#### Nomination speeches
+main.page=read_html("http://www.presidency.ucsb.edu/nomination.php")
+# Get link URLs
+nomin <- f.speechlinks(main.page)
+#head(nomin)
+#
+#### Farewell speeches
+main.page=read_html("http://www.presidency.ucsb.edu/farewell_addresses.php")
+# Get link URLs
+farewell <- f.speechlinks(main.page)
+#head(farewell)
+```
+
+```{r,include=FALSE}
+# Step 2: Using speech metadata posted on <http://www.presidency.ucsb.edu/>
+inaug.list=read.csv("../data/inauglist.csv", stringsAsFactors = FALSE)
+nomin.list=read.csv("../data/nominlist.csv", stringsAsFactors = FALSE)
+farewell.list=read.csv("../data/farewelllist.csv", stringsAsFactors = FALSE)
+```
+
+```{r,include=FALSE}
+# Step 3: scrap the texts of speeches from the speech URLs.
+speech.list=rbind(inaug.list, nomin.list, farewell.list)
+speech.list$type=c(rep("inaug", nrow(inaug.list)),
+                   rep("nomin", nrow(nomin.list)),
+                   rep("farewell", nrow(farewell.list)))
+speech.url=rbind(inaug, nomin, farewell)
+speech.list=cbind(speech.list, speech.url)
+```
+
+```{r,include=FALSE}
+# Loop over each row in speech.list
+speech.list$fulltext=NA
+for(i in seq(nrow(speech.list))) {
+  text <- read_html(speech.list$urls[i]) %>% # load the page
+    html_nodes(".displaytext") %>% # isloate the text
+    html_text() # get the text
+  speech.list$fulltext[i]=text
+  # Create the file name
+  filename <- paste0("../data/fulltext/", 
+                     speech.list$type[i],
+                     speech.list$File[i], "-", 
+                     speech.list$Term[i], ".txt")
+  sink(file = filename) %>% # open file to write 
+  cat(text)  # write the file
+  sink() # close the file
+}
+```
+
+```{r, include=FALSE}
+#Trump data
+speech1=paste(readLines("../data/fulltext/SpeechDonaldTrump-NA.txt", 
+                  n=-1, skipNul=TRUE),
+              collapse=" ")
+speech2=paste(readLines("../data/fulltext/SpeechDonaldTrump-NA2.txt", 
+                  n=-1, skipNul=TRUE),
+              collapse=" ")
+speech3=paste(readLines("../data/fulltext/PressDonaldTrump-NA.txt", 
+                  n=-1, skipNul=TRUE),
+              collapse=" ")
+
+Trump.speeches=data.frame(
+  President=rep("Donald J. Trump", 3),
+  File=rep("DonaldJTrump", 3),
+  Term=rep(0, 3),
+  Party=rep("Republican", 3),
+  Date=c("August 31, 2016", "September 7, 2016", "January 11, 2017"),
+  Words=c(word_count(speech1), word_count(speech2), word_count(speech3)),
+  Win=rep("yes", 3),
+  type=rep("speeches", 3),
+  links=rep(NA, 3),
+  urls=rep(NA, 3),
+  fulltext=c(speech1, speech2, speech3)
+)
+
+speech.list=rbind(speech.list, Trump.speeches)
+```
+
+```{r, message=FALSE, warning=FALSE,include=FALSE}
+# Step 4: data Processing --- generate list of sentences
+sentence.list=NULL
+for(i in 1:nrow(speech.list)){
+  sentences=sent_detect(speech.list$fulltext[i],
+                        endmarks = c("?", ".", "!", "|",";"))
+  if(length(sentences)>0){
+    emotions=get_nrc_sentiment(sentences)
+    word.count=word_count(sentences)
+    # colnames(emotions)=paste0("emo.", colnames(emotions))
+    # in case the word counts are zeros?
+    emotions=diag(1/(word.count+0.01))%*%as.matrix(emotions)
+    sentence.list=rbind(sentence.list, 
+                        cbind(speech.list[i,-ncol(speech.list)],
+                              sentences=as.character(sentences), 
+                              word.count,
+                              emotions,
+                              sent.id=1:length(sentences)
+                              )
+    )
+  }
+}
+```
+
+```{r,include=FALSE}
+sentence.list=
+  sentence.list%>%
+  filter(!is.na(word.count)) 
+
+```
+# Data Construction 
+  Before showing the result of my anlaysis, I will briefly talk about my data. I scrap data from online vocabulary list which consists of [Tier II](https://www.quora.com/What-exactly-is-Tier-2-vocabulary-according-to-the-Common-Core-State-Standards-CCSS) vocabulary from grade zero (kindergarten) to grade twelve. Next, from the "speech.list" data constructed in "Tutorial-TextMining", I split sentences into individual terms and then try to match these terms in each line with vocabulary in the thirteen tier II lists. In this way, I am able to calculate the number of words from each level (grade) within each sentence.
+```{r,include=FALSE}
+setwd("/Users/ZHANGJIAHAO/Desktop/R-studio")
+```
+
+```{r,include=FALSE}
+library(languageR)
+library(pdftools)
+setwd("/Users/ZHANGJIAHAO/Desktop/R-studio")
+nine <- pdf_text("nine.pdf")
+nine <-unlist(strsplit(gsub("\n", "", nine, fixed = TRUE),split = " "))
+nine <-nine[nine!=""]
+nine <-nine[-c(1,105,104,103)]
+ten <- pdf_text("ten.pdf")
+ten <-unlist(strsplit(gsub("\n", "", ten, fixed = TRUE),split = " "))
+ten <-ten[ten!=""]
+ten <- ten[5:99]
+eleven <- pdf_text("eleven.pdf")
+eleven <-unlist(strsplit(gsub("\n", "", eleven, fixed = TRUE),split = " "))
+eleven <-eleven[eleven!=""]
+eleven <- eleven[5:102]
+twelve <- pdf_text("twelve.pdf")
+twelve <-unlist(strsplit(gsub("\n", "", twelve, fixed = TRUE),split = " "))
+twelve <-twelve[twelve!=""]
+twelve <- twelve[5:104]
+#scrapping data form html
+setwd("/Users/ZHANGJIAHAO/Desktop/R-studio")
+seven <-readLines("seven.html", warn = FALSE)
+seven <-gsub(" ", "", seven[666:888], fixed = TRUE)
+seven <-gsub("</td>", "", seven, fixed = TRUE)
+seven <-gsub("</p></td>","",seven,fixed=TRUE) 
+seven <-gsub("<tdvalign=\"top\"><p>","",seven,fixed=TRUE) 
+seven <- seven[seven!=""]
+
+eight <-readLines("eight.html", warn = FALSE)
+eight <-gsub(" ", "", eight[657:885],  fixed = TRUE)
+eight <-gsub("<br/>", "", eight, fixed = TRUE)
+eight <-gsub("</p></td>","",eight,fixed=TRUE) 
+eight <-gsub("<tdvalign=\"top\">","",eight,fixed=TRUE) 
+eight <- eight[eight!=""]
+six <-readLines("six.html", warn = FALSE)
+six <-gsub(" ", "", six[659:894],  fixed = TRUE)
+six <-gsub("<tdvalign=\"top\">", "", six, fixed = TRUE)
+six <-gsub("</p></td>","",six,fixed=TRUE) 
+six <-gsub("<tdvalign=\"top\"><p>","",six,fixed=TRUE) 
+six <- six[six!=""]
+five <-readLines("five.html", warn = FALSE)
+five <-gsub(" ", "",five[659:819],  fixed = TRUE)
+five <-gsub("</td>", "", five, fixed = TRUE)
+five <-gsub("</p></td>","",five,fixed=TRUE) 
+five <-gsub("<tdvalign=\"top\"><p>","",five,fixed=TRUE) 
+five<- five[five!=""]
+four <-readLines("four.html", warn = FALSE)
+four <-gsub(" ", "",four[657:818],  fixed = TRUE)
+four <-gsub("/t/t/t", "", four, fixed = TRUE)
+four <-gsub("</p></td>","",four,fixed=TRUE) 
+four <-gsub("<tdvalign=\"top\"><p>","",four,fixed=TRUE) 
+four<- four[four!=""]
+three <-readLines("three.html", warn = FALSE)
+three <-gsub(" ", "",three[663:827],  fixed = TRUE)
+three <-gsub("<br/>", "", three, fixed = TRUE)
+three <-gsub("<tdvalign=\"top\">", "", three, fixed = TRUE)
+three <-gsub("<p>","",three,fixed=TRUE) 
+three <-gsub("<tdvalign=\"top\"><p>","",three,fixed=TRUE) 
+three<- three[three!=""]
+two <-readLines("two.html", warn = FALSE)
+
+two <-gsub(" ", "",two[657:821],  fixed = TRUE)
+two <-gsub("<tdvalign=\"top\">", "", two, fixed = TRUE)
+two <-gsub("</p></td>","",two,fixed=TRUE) 
+two <-gsub("<tdvalign=\"top\"><p>","",two,fixed=TRUE) 
+two <- two[two!=""]
+one <-readLines("one.html", warn = FALSE)
+
+one <-gsub(" ", "",one[658:817],  fixed = TRUE)
+one <-gsub("<tdvalign=\"top\">", "", one, fixed = TRUE)
+one <-gsub("<br>","",one,fixed=TRUE) 
+one <-gsub("<tdvalign=\"top\"><p>","",one,fixed=TRUE) 
+one <- one[one!=""]
+zero <-readLines("zero.html", warn = FALSE)
+
+zero <-gsub(" ", "",zero[658:775],  fixed = TRUE)
+zero <-gsub("<tdvalign=\"top\">", "", zero, fixed = TRUE)
+zero <-gsub("</td>","",zero,fixed=TRUE) 
+zero <-gsub("<tdvalign=\"top\"><p>","",zero,fixed=TRUE) 
+zero <- zero[zero!=""]
+```
+
+```{r,include=FALSE}
+#seperate the sentence into words
+sentdata <- sentence.list[,-c(10)]
+sentdata <- sentdata[sentdata$type=="inaug",]
+sentdata$sentences <- strsplit(as.character(sentdata$sentences),split = " ")
+head(sentdata$sentences)
+test <- tolower(unlist(strsplit(as.character(gsub("[[:punct:]]","",sentdata$sentences[20])),split = " ")))
+
+library(SnowballC)
+library(stringdist)
+library(quanteda)
+
+#function get_count
+get_count <- function(sen,num){
+  return(sum(wordStem(tolower(unlist(strsplit(as.character(gsub("[[:punct:]]","",sen)),split = " "))))%in%wordStem(num)))    
+}
+sen_count <- function(num){
+  vec <- NULL
+  for (i in 1:5647){
+    new <- get_count(sentdata$sentences[i],num)
+    vec <- append(vec,new)
+  }
+  return(vec)
+}
+vec<-NULL
+for (i in 1:5647){
+  new <- get_count(sentdata$sentences[i],nine)
+  vec <- append(vec,new)
+}
+# Constructing dataframe, adding vocan count 
+sentdata$zero <- sen_count(zero)
+sentdata$one <- sen_count(one)
+sentdata$two <- sen_count(two)
+sentdata$three <- sen_count(three)
+sentdata$four <- sen_count(four)
+sentdata$five <- sen_count(five)
+sentdata$six <- sen_count(six)
+sentdata$seven <- sen_count(seven)
+sentdata$eight <- sen_count(eight)
+sentdata$nine <- sen_count(nine)
+sentdata$ten <- sen_count(ten)
+sentdata$eleven <- sen_count(eleven)
+sentdata$twelve <- sen_count(twelve)
+```
+```{r}
+head(sentdata[,c(1,10,23:35)])
+```
+```{r, include=FALSE}
+library(ggplot2)
+#Barack Obama&Trump&AL Stacked Line Plot
+#try ggplot OB and DT
+agg_stack <-aggregate(sentdata[,c(23:35)],by=list(sentdata$President),FUN = sum)
+agg_stack$sum <-rowSums(agg_stack[,c(2:14)])
+agg_stack$basic <- rowSums(agg_stack[,c(2:6)])/agg_stack$sum
+agg_stack$intermediate <- rowSums(agg_stack[,c(7:10)])/agg_stack$sum
+agg_stack$advance <- rowSums(agg_stack[,c(11:14)])/agg_stack$sum
+
+DT <- agg_stack[(agg_stack$Group.1=="Donald J. Trump"),]
+BO <- agg_stack[(agg_stack$Group.1=="Barack Obama"),]
+combdata <- rbind(DT,BO)
+combdata[,2:14]<-combdata[,2:14]/combdata[,15]
+comb <-reshape(combdata[,1:14],varying = c("zero","one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve"),v.names = "level",direction = "long")
+p3 <- ggplot(comb, aes( time, level))
+p3 + geom_area(aes(colour = Group.1, fill= Group.1,alpha=0.01), position = 'identity')+xlab("vocabulary level")+ylab("percentage")
+```
+# Comparing Trump with other presidents
+Upon collecting the data, I proceed to compare Donald Trump's vocabulary level with those of four other presidents. The result is clear that Trump's inaugural speech contains more basic vocabulary. This agrees with my impression of Trump's speech style. 
+```{r}
+DT <- agg_stack[(agg_stack$Group.1=="Donald J. Trump"),]
+BO <- agg_stack[(agg_stack$Group.1=="John F. Kennedy"),]
+combdata <- rbind(DT,BO)
+combdata[,2:14]<-combdata[,2:14]/combdata[,15]
+comb <-reshape(combdata[,1:14],varying = c("zero","one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve"),v.names = "level",direction = "long")
+p3 <- ggplot(comb, aes( time, level))
+p3 + geom_area(aes(colour = Group.1, fill= Group.1,alpha=0.01), position = 'identity')+xlab("vocabulary level")+ylab("percentage")
+```
+```{r}
+DT <- agg_stack[(agg_stack$Group.1=="Donald J. Trump"),]
+BO <- agg_stack[(agg_stack$Group.1=="Abraham Lincoln"),]
+combdata <- rbind(DT,BO)
+combdata[,2:14]<-combdata[,2:14]/combdata[,15]
+comb <-reshape(combdata[,1:14],varying = c("zero","one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve"),v.names = "level",direction = "long")
+p3 <- ggplot(comb, aes( time, level))
+p3 + geom_area(aes(colour = Group.1, fill= Group.1,alpha=0.01), position = 'identity')+xlab("vocabulary level")+ylab("percentage")
+
+```
+```{r}
+DT <- agg_stack[(agg_stack$Group.1=="Donald J. Trump"),]
+BO <- agg_stack[(agg_stack$Group.1=="Theodore Roosevelt"),]
+combdata <- rbind(DT,BO)
+combdata[,2:14]<-combdata[,2:14]/combdata[,15]
+comb <-reshape(combdata[,1:14],varying = c("zero","one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve"),v.names = "level",direction = "long")
+p3 <- ggplot(comb, aes( time, level))
+p3 + geom_area(aes(colour = Group.1, fill= Group.1,alpha=0.01), position = 'identity')+xlab("vocabulary level")+ylab("percentage")
+```
+
+```{r}
+DT <- agg_stack[(agg_stack$Group.1=="Donald J. Trump"),]
+BO <- agg_stack[(agg_stack$Group.1=="George W. Bush"),]
+combdata <- rbind(DT,BO)
+combdata[,2:14]<-combdata[,2:14]/combdata[,15]
+comb <-reshape(combdata[,1:14],varying = c("zero","one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve"),v.names = "level",direction = "long")
+p3 <- ggplot(comb, aes( time, level))
+p3 + geom_area(aes(colour = Group.1, fill= Group.1,alpha=0.01), position = 'identity')+xlab("vocabulary level")+ylab("percentage")
+```
+```{r,include=FALSE}
+#making barplot for each party
+agg_sentdata_party <-aggregate(sentdata[,c(23:35)],by=list(sentdata$Party),FUN = sum)
+agg_sentdata_party$sum <-rowSums(agg_sentdata_party[,c(2:14)])
+agg_sentdata_party$basic <- rowSums(agg_sentdata_party[,c(2:6)])/agg_sentdata_party$sum
+agg_sentdata_party$intermediate <- rowSums(agg_sentdata_party[,c(7:10)])/agg_sentdata_party$sum
+agg_sentdata_party$advance <- rowSums(agg_sentdata_party[,c(11:14)])/agg_sentdata_party$sum
+box_party_data<-t(agg_sentdata_party[c(16:18)])
+colnames(box_party_data)<-agg_sentdata_party$Group.1
+barplot(box_party_data,col=c("black","blue","white"),ylab = "percentage",las=2,cex.names=0.55)
+#try ggplot
+box_data_wide <-agg_sentdata_party[,c(1,16:18)]
+box_data_long <-reshape(box_data_wide,varying = c("basic","intermediate","advance"),v.names = "level",direction = "long")
+p5 <- ggplot() + geom_bar(aes(y = level, x = Group.1 , fill = time), data = box_data_long,
+                           stat="identity")
+```
+# Is party a deciding factor?
+  Can Trump's speaking manner (a great volume of basic terms) be explained as a strategy of the Republican party? If so I would expect to see a clear seperation between candidates from the two parties. However, my analysis does not support this hypothesis. As shown below, there is no clear relationship between the presidents' word choice and their affiliated parties. One interesting observation is that, Federalist president: John Adams shows a propensity to use more adcanced words and less basic words than other party candidates. 
+```{r}
+p5+theme(axis.text.x = element_text(angle = 90, hjust = 1))+ scale_fill_continuous(name = "level")
+```
+# Is Trump's speaking manner following some trend?
+I plot each president's vocabulary distribution along the time line:
+```{r}
+#giant boxplot
+library(plyr)
+sentdata$year <- as.numeric(substr(sentdata$links,nchar(sentdata$links)-3,nchar(sentdata$links)))
+agg_sentdata <- aggregate(sentdata[,c(23:35)],by=list(sentdata$President),FUN = sum)
+#aggregate year to the data
+agg_sentdata$year <- aggregate(sentdata[,c(36)],by=list(sentdata$President),FUN = head,1)
+#aggregate party to the data
+agg_sentdata$party <- aggregate(sentdata[,c(4)],by=list(sentdata$President),FUN = head,1)
+agg_sentdata$sum <-rowSums(agg_sentdata[,c(2:14)])
+agg_sentdata$basic <- rowSums(agg_sentdata[,c(2:6)])/agg_sentdata$sum
+agg_sentdata$intermediate <- rowSums(agg_sentdata[,c(7:10)])/agg_sentdata$sum
+agg_sentdata$advance <- rowSums(agg_sentdata[,c(11:14)])/agg_sentdata$sum
+agg_sentdata <- agg_sentdata[,-c(18)]
+#making barplot for each president
+test<- agg_sentdata[order(agg_sentdata$year[,2]),]
+box_data<-t(test[c(18:20)])
+colnames(box_data) <- test$Group.1
+barplot(box_data,col=c("black","blue","white"),ylab = "percentage",las=2,cex.names=0.55)
+#try to use ggplot
+gg_data <-agg_sentdata[,c(1,18:20)]
+gg_data_long <-reshape(gg_data,varying = c("basic","intermediate","advance"),v.names = "level",direction = "long")
+order_year <- test[,c(16)]
+merge_long <- merge(gg_data_long,order_year,by="Group.1")
+merge_long <- merge_long[order(merge_long$time,merge_long$x),]
+new_merge <- merge_long
+#Turn your 'treatment' column into a character vector
+new_merge$Group.1 <- as.character(new_merge$Group.1)
+#Then turn it back into an ordered factor
+new_merge$Group.1 <- factor(new_merge$Group.1, levels=unique(new_merge$Group.1))
+rownames(new_merge) <- c(1.1:40.1,1.2:40.2,1.3:40.3)
+p4 <- ggplot() + geom_bar(aes(y = level, x = Group.1 , fill = time), data = new_merge,
+                           stat="identity")+theme(axis.text.x = element_text(angle = 90, hjust = 1))+ scale_fill_continuous(name = "level")
+p4
+```
+As suggested in the barplot, there is a slow increase in basic word use and decrease in advanced word use. Inaugural speeches mainly consist of basic words, and the portion of intermediate vocabulary remains relatively stable across time. In conclusion, the simplicity of Trump's inaugural speech examplifies a trend in the political sphere. I then proceed to explain this trend by topic modeling.
+```{r,include=FALSE}
+#making barplot for each party
+agg_sentdata_party <-aggregate(sentdata[,c(23:35)],by=list(sentdata$Party),FUN = sum)
+agg_sentdata_party$sum <-rowSums(agg_sentdata_party[,c(2:14)])
+agg_sentdata_party$basic <- rowSums(agg_sentdata_party[,c(2:6)])/agg_sentdata_party$sum
+agg_sentdata_party$intermediate <- rowSums(agg_sentdata_party[,c(7:10)])/agg_sentdata_party$sum
+agg_sentdata_party$advance <- rowSums(agg_sentdata_party[,c(11:14)])/agg_sentdata_party$sum
+box_party_data<-t(agg_sentdata_party[c(16:18)])
+colnames(box_party_data)<-agg_sentdata_party$Group.1
+barplot(box_party_data,col=c("black","blue","white"),ylab = "percentage",las=2,cex.names=0.55)
+```
+# Topic modeling
+
+  For topic modeling, I run LDA for all the vocabulary in the speeches, which are grouped into 15 categories: "election","hope","defense","motivation","legislation","ideology","nation","citizenship","economy","service","gov-system","international","individual","market","workingfamily"
+
+```{r,include=FALSE}
+sentence.list <- sentence.list[sentence.list$type=="inaug",]
+corpus.list=sentence.list[2:(nrow(sentence.list)-1), ]
+sentence.pre=sentence.list$sentences[1:(nrow(sentence.list)-2)]
+sentence.post=sentence.list$sentences[3:(nrow(sentence.list)-1)]
+corpus.list$snipets=paste(sentence.pre, corpus.list$sentences, sentence.post, sep=" ")
+rm.rows=(1:nrow(corpus.list))[corpus.list$sent.id==1]
+rm.rows=c(rm.rows, rm.rows-1)
+corpus.list=corpus.list[-rm.rows, ]
+```
+
+
+```{r,include=FALSE}
+docs <- Corpus(VectorSource(corpus.list$snipets))
+wl1 <- writeLines(as.character(docs[[sample(1:nrow(corpus.list), 1)]]))
+```
+
+```{r,include=FALSE}
+#remove potentially problematic symbols
+docs <-tm_map(docs,content_transformer(tolower))
+writeLines(as.character(docs[[sample(1:nrow(corpus.list), 1)]]))
+
+#remove punctuation
+docs <- tm_map(docs, removePunctuation)
+writeLines(as.character(docs[[sample(1:nrow(corpus.list), 1)]]))
+
+#Strip digits
+docs <- tm_map(docs, removeNumbers)
+writeLines(as.character(docs[[sample(1:nrow(corpus.list), 1)]]))
+
+#remove stopwords
+docs <- tm_map(docs, removeWords, stopwords("english"))
+writeLines(as.character(docs[[sample(1:nrow(corpus.list), 1)]]))
+
+#remove whitespace
+docs <- tm_map(docs, stripWhitespace)
+writeLines(as.character(docs[[sample(1:nrow(corpus.list), 1)]]))
+
+#Stem document
+docs <- tm_map(docs,stemDocument)
+invisible(wl <- writeLines(as.character(docs[[sample(1:nrow(corpus.list), 1)]])))
+```
+
+
+
+
+
+```{r,include=FALSE}
+dtm <- DocumentTermMatrix(docs)
+#convert rownames to filenames#convert rownames to filenames
+rownames(dtm) <- paste(corpus.list$type, corpus.list$File,
+                       corpus.list$Term, corpus.list$sent.id, sep="_")
+
+rowTotals <- apply(dtm , 1, sum) #Find the sum of words in each Document
+
+dtm  <- dtm[rowTotals> 0, ]
+corpus.list=corpus.list[rowTotals>0, ]
+
+```
+
+
+
+```{r,include=FALSE}
+#Set parameters for Gibbs sampling
+burnin <- 4000
+iter <- 2000
+thin <- 500
+seed <-list(2003,5,63,100001,765)
+nstart <- 5
+best <- TRUE
+
+#Number of topics
+k <- 15
+
+#Run LDA using Gibbs sampling
+ldaOut <-LDA(dtm, k, method="Gibbs", control=list(nstart=nstart, 
+                                                 seed = seed, best=best,
+                                                 burnin = burnin, iter = iter, 
+                                                 thin=thin))
+#write out results
+#docs to topics
+ldaOut.topics <- as.matrix(topics(ldaOut))
+table(c(1:k, ldaOut.topics))
+write.csv(ldaOut.topics,file=paste("/Users/ZHANGJIAHAO/Desktop/R-studio",k,"DocsToTopics.csv"))
+
+#top 6 terms in each topic
+ldaOut.terms <- as.matrix(terms(ldaOut,20))
+write.csv(ldaOut.terms,file=paste("/Users/ZHANGJIAHAO/Desktop/R-studio",k,"TopicsToTerms.csv"))
+
+#probabilities associated with each topic assignment
+topicProbabilities <- as.data.frame(ldaOut@gamma)
+write.csv(topicProbabilities,file=paste("/Users/ZHANGJIAHAO/Desktop/R-studio",k,"TopicProbabilities.csv"))
+```
+```{r,include=FALSE}
+terms.beta=ldaOut@beta
+terms.beta=scale(terms.beta)
+topics.terms=NULL
+topi <- for(i in 1:k){
+  topics.terms=rbind(topics.terms, ldaOut@terms[order(terms.beta[i,], decreasing = TRUE)[1:7]])
+}
+```
+
+
+```{r,include=FALSE}
+topics.hash =c("election","hope","defense","motivation","legislation","ideology","nation","citizenship","economy","service","gov-system","international","individual","market","workingfamily")
+
+corpus.list$ldatopic=as.vector(ldaOut.topics)
+corpus.list$ldahash=topics.hash[ldaOut.topics]
+
+colnames(topicProbabilities)=topics.hash
+corpus.list.df=cbind(corpus.list, topicProbabilities)
+```
+
+
+```{r, fig.width=6, fig.height=8}
+par(mar=c(1,1,1,1))
+topic.summary=tbl_df(corpus.list.df)%>%
+              filter(type%in%c("inaug"))%>%
+              select(File, election:workingfamily)%>%
+              group_by(File)%>%
+              summarise_each(funs(mean))
+topic.summary=as.data.frame(topic.summary)
+rownames(topic.summary)=topic.summary[,1]
+
+# [1] "Economy"         "America"         "Defense"         "Belief"         
+# [5] "Election"        "Patriotism"      "Unity"           "Government"     
+# [9] "Reform"          "Temporal"        "WorkingFamilies" "Freedom"        
+# [13] "Equality"        "Misc"            "Legislation"       
+
+topic.plot=c(1:15)
+print(topics.hash[topic.plot])
+
+timeorder <- inaug.list[,c(2,3,5)]
+timeorder <- timeorder[timeorder$Term==1,]
+timeorder$ord <- c(1:39)
+
+yy <- merge(topic.summary,timeorder,by="File")
+xxx <- yy[order(yy$ord),]
+topic.summary <- xxx[,1:16]
+rownames(topic.summary) <- xxx$File 
+
+heatmap.2(as.matrix(topic.summary[,topic.plot+1]), 
+          scale = "column", key=T,,keysize = 1, 
+          col = bluered(100),
+          cexRow = 0.9, cexCol = 0.9, margins = c(8, 8),
+          trace = "none", Rowv = NA, density.info = "none")
+```
+
+
+The heatmap shows a shift in topics. Before Roosevelt, most presidential speeches expounded on concrete policies and ideas such as legislation, govenment system and economy etc whereas the more recent presidential speech focused more on abstract ideologies, hope and motivation etc. Notice that a shift in topics could cause a change in the frequency of certain lists of vocabulary. For example topics like government service, system and economy might require more advanced words than those for the "hope" and "motivation". 
+
+# Conclusion
+Donald Trump does talk in a much simpler way than most other presidents. However this is not as irrational as it might have seemed to us during the campaign. A preference for basic words over advanced words is evident. in today's politics and can possibly be explained by the shift in topics of political speeches.
